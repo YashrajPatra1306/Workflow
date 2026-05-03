@@ -1,0 +1,267 @@
+{
+  "name": "AI Director",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "director",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "webhook-node",
+      "name": "Intent Receiver",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body;\nreturn [{\n  json: {\n    intent: body.intent,\n    target_path: body.target_path || 'D:/output',\n    context: body.context || '',\n    model: body.model || 'qwen2.5-coder:14b'\n  }\n}];"
+      },
+      "id": "parse-input-node",
+      "name": "Parse Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:11434/api/generate",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"model\": \"{{ $json.model }}\",\n  \"prompt\": \"You are an AI Director Planner. Given the following intent and context, create a structured execution plan with clear steps.\\n\\nIntent: {{ $json.intent }}\\nContext: {{ $json.context }}\\n\\nReturn ONLY valid JSON in this format:\\n{\\n  \\\"steps\\\": [\\n    {\\n      \\\"step_id\\\": \\\"step-1\\\",\\n      \\\"step_title\\\": \\\"<title>\\\",\\n      \\\"step_description\\\": \\\"<detailed description of what to generate>\\\"\\n    }\\n  ]\\n}\",\n  \"stream\": false\n}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "planner-llm-node",
+      "name": "Planner LLM",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nlet planText = response.response || '';\n\n// Clean up markdown fences\nplanText = planText.replace(/```json\\n?/g, '').replace(/```\\n?/g, '').trim();\n\ntry {\n  const plan = JSON.parse(planText);\n  const steps = plan.steps || plan;\n  // Return array of items for splitInBatches-like processing\n  return steps.map((step, index) => ({\n    json: {\n      step_id: step.step_id || `step-${index + 1}`,\n      step_title: step.step_title || 'Untitled Step',\n      step_description: step.step_description || '',\n      model: $input.first().json.model,\n      target_path: $input.first().json.target_path,\n      intent: $input.first().json.intent,\n      context: $input.first().json.context\n    }\n  }));\n} catch (e) {\n  throw new Error('Failed to parse planner output: ' + e.message + '\\nRaw output: ' + planText);\n}"
+      },
+      "id": "parse-plan-node",
+      "name": "Parse Plan",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        900,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:11434/api/generate",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"model\": \"{{ $json.model }}\",\n  \"prompt\": \"You are an executor. Generate the content for this step:\\n\\nStep ID: {{ $json.step_id }}\\nStep Title: {{ $json.step_title }}\\nStep Description: {{ $json.step_description }}\\nIntent: {{ $json.intent }}\\nContext: {{ $json.context }}\\n\\nReturn ONLY valid JSON in this format:\\n{\\n  \\\"content\\\": \\\"<generated file content>\\\",\\n  \\\"reasoning\\\": \\\"<chain of thought reasoning>\\\",\\n  \\\"filename\\\": \\\"<suggested filename>\\\"\\n}\",\n  \"stream\": false\n}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "executor-llm-node",
+      "name": "Executor LLM",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1120,
+        300
+      ],
+      "executeOnce": false
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nlet outputText = response.response || '';\n\n// Clean up markdown fences\noutputText = outputText.replace(/```json\\n?/g, '').replace(/```\\n?/g, '').trim();\n\ntry {\n  const output = JSON.parse(outputText);\n  return [{\n    json: {\n      content: output.content,\n      reasoning: output.reasoning,\n      filename: output.filename || 'output.txt',\n      step_id: $input.first().json.step_id,\n      step_title: $input.first().json.step_title,\n      step_description: $input.first().json.step_description,\n      target_path: $input.first().json.target_path,\n      model: $input.first().json.model,\n      intent: $input.first().json.intent,\n      context: $input.first().json.context\n    }\n  }];\n} catch (e) {\n  throw new Error('Failed to parse executor output: ' + e.message + '\\nRaw output: ' + outputText);\n}"
+      },
+      "id": "parse-output-node",
+      "name": "Parse Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "filePath": "={{ $json.target_path + '/' + $json.filename }}",
+        "fileContent": "={{ $json.content }}",
+        "options": {
+          "encoding": "utf8"
+        }
+      },
+      "id": "write-output-file-node",
+      "name": "Write Output File",
+      "type": "n8n-nodes-base.readWriteFilesFromDisk",
+      "typeVersion": 1,
+      "position": [
+        1560,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const now = new Date();\nconst timestamp = now.toISOString().replace(/[:.]/g, '-').slice(0, -5);\nconst logFilename = `${timestamp}-step-${$input.first().json.step_id}.md`;\n\nconst cotLog = `# Step: ${$input.first().json.step_title}\\n\\n## Metadata\\n- **Step ID**: ${$input.first().json.step_id}\\n- **Timestamp**: ${now.toISOString()}\\n- **Model**: ${$input.first().json.model}\\n- **Intent**: ${$input.first().json.intent}\\n- **Target Path**: ${$input.first().json.target_path}\\n\\n## Step Description\\n${$input.first().json.step_description}\\n\\n## Chain of Thought\\n${$input.first().json.reasoning}\\n\\n## Generated Content\\n\\`\\`\\`\\n${$input.first().json.content}\\n\\`\\`\\`\\n\\n## Output File\\n- **Filename**: ${$input.first().json.filename}\\n- **Full Path**: ${$input.first().json.target_path}/${$input.first().json.filename}\\n`;\n\nreturn [{\n  json: {\n    logFilename: logFilename,\n    logContent: cotLog,\n    output_file: $input.first().json.target_path + '/' + $input.first().json.filename,\n    step_title: $input.first().json.step_title,\n    log_path: 'D:/ToE/ObsidianVaults/AsherGraves/Director Logs/' + logFilename\n  }\n}];"
+      },
+      "id": "format-cot-log-node",
+      "name": "Format CoT Log",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "filePath": "D:/ToE/ObsidianVaults/AsherGraves/Director Logs/{{ $json.logFilename }}",
+        "fileContent": "={{ $json.logContent }}",
+        "options": {
+          "encoding": "utf8"
+        }
+      },
+      "id": "write-to-obsidian-node",
+      "name": "Write to Obsidian",
+      "type": "n8n-nodes-base.readWriteFilesFromDisk",
+      "typeVersion": 1,
+      "position": [
+        1780,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{\n  json: {\n    status: 'success',\n    output_file: $input.first().json.output_file,\n    log_file: $input.first().json.log_path,\n    step_title: $input.first().json.step_title\n  }\n}];"
+      },
+      "id": "return-status-node",
+      "name": "Return Status",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1780,
+        200
+      ]
+    }
+  ],
+  "connections": {
+    "Intent Receiver": {
+      "main": [
+        [
+          {
+            "node": "Parse Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Input": {
+      "main": [
+        [
+          {
+            "node": "Planner LLM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Planner LLM": {
+      "main": [
+        [
+          {
+            "node": "Parse Plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Plan": {
+      "main": [
+        [
+          {
+            "node": "Executor LLM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Executor LLM": {
+      "main": [
+        [
+          {
+            "node": "Parse Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Output": {
+      "main": [
+        [
+          {
+            "node": "Write Output File",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Format CoT Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Output File": {
+      "main": [
+        [
+          {
+            "node": "Return Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format CoT Log": {
+      "main": [
+        [
+          {
+            "node": "Write to Obsidian",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 1,
+  "updatedAt": "2024-01-01T00:00:00.000Z",
+  "versionId": "ai-director-v1",
+  "executionOrder": "v1"
+}
