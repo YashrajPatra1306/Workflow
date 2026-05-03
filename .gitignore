@@ -1,3 +1,25 @@
-Since the only file change is the addition of `.gitignore` itself and there are no other file changes provided in the list, there are no build artifacts, dependencies, or temporary files to ignore. The change list contains only the `.gitignore` file itself, which is a configuration file.
+```
+# Dependencies
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
 
-Therefore, no additional ignore rules are needed beyond what might already exist, and since the request is to optimize based on file changes and there are no meaningful changes to consider, the output is empty.
+# Environment
+.env
+.env.local
+.env.*
+
+# Logs and temp files
+*.log
+*.tmp
+
+# Editors
+.vscode/
+.idea/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+```

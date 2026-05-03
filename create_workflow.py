@@ -1,0 +1,206 @@
+#!/usr/bin/env python3
+import json
+
+workflow = {
+  "name": "AI Director with Cloud Fallback",
+  "nodes": [
+    {
+      "parameters": {"httpMethod": "POST", "path": "director", "responseMode": "lastNode", "options": {}},
+      "id": "intent-receiver",
+      "name": "Intent Receiver",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {"jsCode": "const body = $input.first().json.body;\nreturn [{\n  json: {\n    intent: body.intent,\n    target_path: body.target_path || 'D:/output',\n    context: body.context || '',\n    model: body.model || 'qwen2.5-coder:14b'\n  }\n}];"},
+      "id": "parse-input",
+      "name": "Parse Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:11434/api/generate",
+        "sendBody": True,
+        "bodyParameters": {"parameters": [
+          {"name": "model", "value": "={{ $json.model }}"},
+          {"name": "prompt", "value": "=You are a strategic planner.\n\nINTENT: {{ $json.intent }}\nCONTEXT: {{ $json.context }}\nTARGET PATH: {{ $json.target_path }}\n\nCreate a structured plan with discrete steps.\n\nRespond ONLY in valid JSON. No markdown fences.\n\nSchema:\n{\n  \"plan_meta\": {\n    \"intent_summary\": \"one line summary\",\n    \"plan_reasoning\": \"why this approach\"\n  },\n  \"steps\": [\n    {\n      \"step_id\": \"step_1\",\n      \"title\": \"clear title\",\n      \"description\": \"what to do\",\n      \"target_file\": \"filename.ext\",\n      \"expected_output\": \"what success looks like\",\n      \"reasoning\": \"why this step matters\"\n    }\n  ]\n}"},
+          {"name": "stream", "value": False}
+        ]},
+        "options": {}
+      },
+      "id": "planner-llm",
+      "name": "Planner LLM",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {"jsCode": "const data = $input.first().json;\nlet content = data.response || data.raw || '';\nif (content.startsWith('```')) {\n  content = content.replace(/^```[\\w]*\\n?/, '').replace(/```$/, '').trim();\n}\nlet parsed;\ntry {\n  const jsonMatch = content.match(/\\{[\\s\\S]*\\}/);\n  if (jsonMatch) { parsed = JSON.parse(jsonMatch[0]); }\n  else { parsed = JSON.parse(content); }\n} catch(e) { throw new Error('Could not parse planner output: ' + e.message); }\nconst steps = parsed.steps || [];\nreturn steps.map(step => ({\n  json: {\n    step: step,\n    plan_meta: parsed.plan_meta,\n    target_path: $('Parse Input').first().json.target_path,\n    model: $('Parse Input').first().json.model,\n    intent: $('Parse Input').first().json.intent,\n    context: $('Parse Input').first().json.context\n  }\n}));"},
+      "id": "parse-plan",
+      "name": "Parse Plan",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:11434/api/generate",
+        "sendBody": True,
+        "bodyParameters": {"parameters": [
+          {"name": "model", "value": "={{ $json.model }}"},
+          {"name": "prompt", "value": "=You are a precise executor. Complete ONE assigned step.\n\nOVERALL INTENT: {{ $json.plan_meta.intent_summary }}\nPLAN REASONING: {{ JSON.stringify($json.plan_meta.plan_reasoning) }}\n\nYOUR STEP:\n- Title: {{ $json.step.title }}\n- Description: {{ $json.step.description }}\n- Target file: {{ $json.step.target_file }}\n- Expected output: {{ $json.step.expected_output }}\n- Step reasoning: {{ $json.step.reasoning }}\n\nRules:\n- Produce ONLY what this step requires\n- Do NOT speculate about future steps\n- Output must be immediately usable without modification\n- Explain every significant decision\n\nRespond ONLY in valid JSON. No preamble. No markdown fences.\n\nSchema:\n{\n  \"reasoning\": {\n    \"approach\": \"...\",\n    \"decisions\": [{\"decision\": \"...\", \"alternative\": \"...\", \"why_chosen\": \"...\"}],\n    \"assumptions\": [\"...\"]\n  },\n  \"output\": \"complete file content as string\",\n  \"notes\": \"anything next step should know\"\n}"},
+          {"name": "stream", "value": False}
+        ]},
+        "options": {}
+      },
+      "id": "executor-llm",
+      "name": "Executor LLM",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1050, 300]
+    },
+    {
+      "parameters": {"jsCode": "const data = $input.first().json;\nlet content = data.response || data.raw || '';\nif (content.startsWith('```')) {\n  content = content.replace(/^```[\\w]*\\n?/, '').replace(/```$/, '').trim();\n}\nlet result;\ntry {\n  const jsonMatch = content.match(/\\{[\\s\\S]*\\}/);\n  if (jsonMatch) { result = JSON.parse(jsonMatch[0]); }\n  else { result = JSON.parse(content); }\n} catch(e) { throw new Error('Could not parse executor output: ' + e.message); }\nreturn [{\n  json: {\n    target_file: $json.step.target_file,\n    file_content: result.output,\n    reasoning: result.reasoning,\n    notes: result.notes,\n    step_title: $json.step.title,\n    step_id: $json.step.step_id,\n    plan_meta: $json.plan_meta,\n    target_path: $json.target_path,\n    cloud_used: false\n  }\n}];"},
+      "id": "parse-output",
+      "name": "Parse Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "filePath": "={{ $json.target_path + '/' + $json.target_file }}",
+        "fileContent": "={{ $json.file_content }}",
+        "options": {"encoding": "utf8"}
+      },
+      "id": "write-output-file",
+      "name": "Write Output File",
+      "type": "n8n-nodes-base.readWriteFilesFromDisk",
+      "typeVersion": 3,
+      "position": [1450, 300]
+    },
+    {
+      "parameters": {"jsCode": "const step = $input.first().json;\nconst now = new Date();\nconst timestamp = now.toISOString().replace(/[:.]/g, '-').slice(0, -5);\nconst filename = `${timestamp}-step-${step.step_id}.md`;\nconst logContent = `---\ntags: [director/log, ai-execution]\ndate: ${now.toISOString()}\nstep_id: ${step.step_id}\ncloud_used: ${step.cloud_used}\n---\n\n# Execution Log: ${step.step_title}\n\n## Metadata\n- **Run ID**: ${$runId}\n- **Timestamp**: ${now.toLocaleString()}\n- **Step ID**: ${step.step_id}\n- **Target File**: ${step.target_file}\n- **Cloud Model**: ${step.cloud_used ? 'Yes' : 'No (Local Ollama)'}\n\n## Plan Context\n### Intent Summary\n${step.plan_meta.intent_summary}\n\n### Plan Reasoning\n${step.plan_meta.plan_reasoning}\n\n## Execution Details\n### Approach\n${step.reasoning?.approach || 'N/A'}\n\n### Decisions\n${step.reasoning?.decisions?.map(d => `- **${d.decision}**\\n  - Alternative: ${d.alternative}\\n  - Why: ${d.why_chosen}`).join('\\n') || 'None recorded'}\n\n### Assumptions\n${step.reasoning?.assumptions?.map(a => `- ${a}`).join('\\n') || 'None recorded'}\n\n## Notes\n${step.notes || 'No additional notes'}\n\n## File Path\nOutput written to: \\`${step.target_path}/${step.target_file}\\`\n`;\nreturn [{\n  json: {\n    ...step,\n    log_filename: filename,\n    log_content: logContent,\n    log_path: `D:/ToE/ObsidianVaults/AsherGraves/Director Logs/${filename}`\n  }\n}];"},
+      "id": "format-cot-log",
+      "name": "Format CoT Log",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1650, 300]
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "filePath": "={{ $json.log_path }}",
+        "fileContent": "={{ $json.log_content }}",
+        "options": {"encoding": "utf8"}
+      },
+      "id": "write-to-obsidian",
+      "name": "Write to Obsidian",
+      "type": "n8n-nodes-base.readWriteFilesFromDisk",
+      "typeVersion": 3,
+      "position": [1850, 300]
+    },
+    {
+      "parameters": {"jsCode": "const step = $input.first().json;\nreturn [{\n  json: {\n    status: 'success',\n    output_file: `${step.target_path}/${step.target_file}`,\n    log_file: step.log_path,\n    step_title: step.step_title,\n    step_id: step.step_id,\n    cloud_used: step.cloud_used,\n    run_id: $runId\n  }\n}];"},
+      "id": "return-status",
+      "name": "Return Status",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2050, 300]
+    },
+    {
+      "parameters": {"jsCode": "const step = $input.first().json;\nreturn [{\n  json: {\n    ...step,\n    ask_approval: true,\n    run_id: $runId\n  }\n}];"},
+      "id": "quality-gate",
+      "name": "Quality Gate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1450, 500]
+    },
+    {
+      "parameters": {"resume": "webhook", "webhookPath": "approve-cloud/{{ $json.run_id }}", "respond": "usingRespondBinary"},
+      "id": "wait-for-approval",
+      "name": "Wait for Approval",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [1650, 500]
+    },
+    {
+      "parameters": {"conditions": {"boolean": [{"value1": "={{ $json.use_cloud }}", "operation": "equals", "value2": "true"}]}},
+      "id": "user-approved",
+      "name": "User Approved?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1850, 500]
+    },
+    {
+      "parameters": {"jsCode": "const FREE_MODELS = [\n  \"qwen/qwen3-coder:free\",\n  \"qwen/qwen2.5-coder-32b-instruct:free\",\n  \"qwen/qwen2.5-vl-72b-instruct:free\",\n  \"deepseek/deepseek-chat:free\",\n  \"deepseek/deepseek-coder:free\",\n  \"meta-llama/llama-3.3-70b-instruct:free\",\n  \"meta-llama/llama-3.1-70b-instruct:free\",\n  \"meta-llama/llama-3.1-8b-instruct:free\",\n  \"google/gemma-2-9b-it:free\",\n  \"mistralai/mistral-7b-instruct:free\",\n  \"microsoft/phi-3.5-mini-128k-instruct:free\",\n  \"nousresearch/nous-hermes-2-mixtral-8x7b-dpo:free\",\n  \"openchat/openchat-7b:free\",\n  \"undi95/toppy-m-7b:free\"\n];\nconst input = $input.first().json;\nconst requestedModel = input.preferred_cloud_model;\nif (requestedModel && FREE_MODELS.includes(requestedModel)) {\n  return [{\n    json: {\n      ...input,\n      selected_model: requestedModel,\n      available_free_models: FREE_MODELS,\n      model_source: \"user_requested\"\n    }\n  }];\n}\nreturn [{\n  json: {\n    ...input,\n    selected_model: FREE_MODELS[0],\n    available_free_models: FREE_MODELS,\n    model_source: \"auto_selected\",\n    fallback_order: FREE_MODELS.slice(1)\n  }\n}];"},
+      "id": "select-cloud-model",
+      "name": "Select Cloud Model",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2050, 500]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": True,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"model\": \"={{ $json.selected_model }}\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are a precise executor. Complete ONE assigned step.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"=OVERALL INTENT: {{ $json.plan_meta.intent_summary }}\\nPLAN REASONING: {{ JSON.stringify($json.plan_meta.plan_reasoning) }}\\n\\nYOUR STEP:\\n- Title: {{ $json.step.title }}\\n- Description: {{ $json.step.description }}\\n- Target file: {{ $json.step.target_file }}\\n- Expected output: {{ $json.step.expected_output }}\\n- Step reasoning: {{ $json.step.reasoning }}\\n\\nRules:\\n- Produce ONLY what this step requires\\n- Do NOT speculate about future steps\\n- Output must be immediately usable without modification\\n- Explain every significant decision\\n\\nRespond ONLY in valid JSON. No preamble. No markdown fences.\\n\\nSchema:\\n{\\n  \\\"reasoning\\\": {\\n    \\\"approach\\\": \\\"...\\\",\\n    \\\"decisions\\\": [{\\\"decision\\\": \\\"...\\\", \\\"alternative\\\": \\\"...\\\", \\\"why_chosen\\\": \\\"...\\\"}],\\n    \\\"assumptions\\\": [\\\"...\\\"]\\n  },\\n  \\\"output\\\": \\\"complete file content as string\\\",\\n  \\\"notes\\\": \\\"anything next step should know\\\"\\n}\"\n    }\n  ],\n  \"stream\": false\n}",
+        "options": {}
+      },
+      "id": "executor-llm-cloud",
+      "name": "Executor LLM (Cloud)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2250, 500],
+      "credentials": {"httpHeaderAuth": {"id": "openrouter-auth", "name": "OpenRouter Auth"}}
+    },
+    {
+      "parameters": {"jsCode": "const data = $input.first().json;\nconst content = data.choices?.[0]?.message?.content || '';\nlet cleaned = content.trim();\nif (cleaned.startsWith('```')) {\n  cleaned = cleaned.replace(/^```[\\w]*\\n?/, '').replace(/```$/, '').trim();\n}\nlet result;\ntry {\n  const jsonMatch = cleaned.match(/\\{[\\s\\S]*\\}/);\n  if (jsonMatch) { result = JSON.parse(jsonMatch[0]); }\n  else { result = JSON.parse(cleaned); }\n} catch(e) {\n  throw new Error('Could not parse cloud executor output: ' + e.message + '\\n\\nRaw: ' + cleaned);\n}\nreturn [{\n  json: {\n    target_file: $json.step.target_file,\n    file_content: result.output,\n    reasoning: result.reasoning,\n    notes: result.notes,\n    step_title: $json.step.title,\n    step_id: $json.step.step_id,\n    plan_meta: $json.plan_meta,\n    target_path: $json.target_path,\n    cloud_used: true\n  }\n}];"},
+      "id": "parse-cloud-output",
+      "name": "Parse Cloud Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2450, 500]
+    }
+  ],
+  "connections": {
+    "Intent Receiver": {"main": [[{"node": "Parse Input", "type": "main", "index": 0}]]},
+    "Parse Input": {"main": [[{"node": "Planner LLM", "type": "main", "index": 0}]]},
+    "Planner LLM": {"main": [[{"node": "Parse Plan", "type": "main", "index": 0}]]},
+    "Parse Plan": {"main": [[{"node": "Executor LLM", "type": "main", "index": 0}]]},
+    "Executor LLM": {"main": [[{"node": "Parse Output", "type": "main", "index": 0}]]},
+    "Parse Output": {"main": [[{"node": "Write Output File", "type": "main", "index": 0}, {"node": "Format CoT Log", "type": "main", "index": 0}]]},
+    "Format CoT Log": {"main": [[{"node": "Write to Obsidian", "type": "main", "index": 0}]]},
+    "Write Output File": {"main": [[{"node": "Quality Gate", "type": "main", "index": 0}]]},
+    "Quality Gate": {"main": [[{"node": "Wait for Approval", "type": "main", "index": 0}]]},
+    "Wait for Approval": {"main": [[{"node": "User Approved?", "type": "main", "index": 0}]]},
+    "User Approved?": {"main": [[{"node": "Select Cloud Model", "type": "main", "index": 0}], [{"node": "Return Status", "type": "main", "index": 0}]]},
+    "Select Cloud Model": {"main": [[{"node": "Executor LLM (Cloud)", "type": "main", "index": 0}]]},
+    "Executor LLM (Cloud)": {"main": [[{"node": "Parse Cloud Output", "type": "main", "index": 0}]]},
+    "Parse Cloud Output": {"main": [[{"node": "Write Output File", "type": "main", "index": 0}, {"node": "Format CoT Log", "type": "main", "index": 0}]]},
+    "Write to Obsidian": {"main": [[{"node": "Return Status", "type": "main", "index": 0}]]}
+  },
+  "settings": {"executionOrder": "v1"},
+  "staticData": None,
+  "tags": [],
+  "triggerCount": 1,
+  "updatedAt": "2025-01-15T00:00:00.000Z",
+  "versionId": "ai-director-v2-cloud-fallback-multi-model"
+}
+
+with open('/workspace/ai-director-workflow-with-cloud-fallback.json', 'w') as f:
+    json.dump(workflow, f, indent=2)
+print("Workflow created successfully!")
+print(f"Total nodes: {len(workflow['nodes'])}")
+for n in workflow['nodes']:
+    print(f"  - {n['name']}")
